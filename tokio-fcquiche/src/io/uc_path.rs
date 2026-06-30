@@ -232,7 +232,9 @@ impl UcPathRun for UcPathFileTransfer {
                     McRole::ServerUnicast(McClientStatus::ListenMcPath(true)),
                 ) = (sent_ready, mc.get_mc_role())
                 {
-                    let msg = MsgFcCtl::RecvReady(self.0.client_id);
+                    let fc_id = mc.get_fc_chan_id().map(|a| a.1 as u64);
+                    let msg = MsgFcCtl::RecvReady(self.0.client_id,fc_id);
+                    trace!("RecvRead : {}",self.0.client_id);
                     self.0.tx_tcl.send(msg).await.unwrap();
                     sent_ready = true;
                     if let Some(ref mut scheduler) = self.0.fcf_scheduler {

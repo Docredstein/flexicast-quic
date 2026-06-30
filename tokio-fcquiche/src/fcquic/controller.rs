@@ -214,8 +214,7 @@ impl FcController {
             recv_rtt_us: HashMap::new(),
             last_bottleneck_check: None,
             fallback_gain_ratio,
-            fallback_min_samples: fallback_min_samples
-                .unwrap_or(RTT_MIN_SAMPLES),
+            fallback_min_samples: fallback_min_samples.unwrap_or(RTT_MIN_SAMPLES),
             reintegration_candidates: HashMap::new(),
             last_reintegration_check: None,
             reintegration_delay,
@@ -234,6 +233,7 @@ impl FcController {
                 break;
             }
             for msg in vec_of_msg.drain(..nb_recv) {
+                trace!("Handling : {msg:?}");
                 if let Err(e) = self.handle_fc_msg(msg).await {
                     info!("ERROR {:?}: {e:?}.", self.controller_role.name());
                     return Err(e);
@@ -320,9 +320,9 @@ impl FcController {
                 .await?;
             },
 
-            MsgFcCtl::RecvReady(id) => {
+            MsgFcCtl::RecvReady(id,fc_id) => {
                 debug!("{} New ready client {id}", self.controller_role.name());
-                self.handle_new_ready(id).await?;
+                self.handle_new_ready(id,fc_id).await?;
             },
 
             MsgFcCtl::StreamData((data, stream_id, fin, min_off)) => {
@@ -396,7 +396,7 @@ impl FcController {
                 if matches!(self.controller_role, ControllerRole::Root(_)) {
                     return Ok(());
                 }
-                
+
                 self.do_recv_uc_fallback(id, fc_chan_id).await?;
             },
 
@@ -404,7 +404,9 @@ impl FcController {
                 if matches!(self.controller_role, ControllerRole::Leaf(_)) {
                     self.reintegration_candidates.remove(&recv_id);
                     _ = self.unicast_recv.remove(&recv_id);
-                    println!("Receiver {recv_id} reintegrated into FC flow {fc_id}");
+                    println!(
+                        "Receiver {recv_id} reintegrated into FC flow {fc_id}"
+                    );
                 }
             },
 
@@ -480,7 +482,7 @@ impl FcController {
     /// A new receiver is ready to listen to multicast content.
     /// If all receivers are ready, the controller notifies the flexicast
     /// sources.
-    async fn handle_new_ready(&mut self, _id: u64) -> Result<()> {
+    async fn handle_new_ready(&mut self, recv_id: u64,fc_id:Option<u64>) -> Result<()> {
         let name = self.controller_role.name();
         info!("{name} receives a RecvReady!");
         self.nb_ready += 1;
@@ -490,7 +492,30 @@ impl FcController {
             // arriving receiver. The root is responsible to handle
             // the number of receivers.
             ControllerRole::Leaf(leaf) => {
-                let msg = MsgFcCtl::RecvReady(leaf.leaf_id);
+                // Add the receiver in the state if we have to wait for a given number of receiver greater than 1.
+                // This is ugly.
+                if let Some(id) = fc_id {
+                    if self.wait.is_some_and(|w| w > 1) {
+                    let pn = self.mc_acks[id as usize]
+                        .get_largest_pn()
+                        .unwrap_or(0);
+                    trace!("Should wait so insert");
+                    // The first packet number should be 2?
+                    let new_insert =
+                        self.active_clients[id as usize].insert(recv_id, pn);
+                    _ = self.unicast_recv.remove(&recv_id);
+                    _ = self.delegated_recv[id as usize].remove(&recv_id);
+                    if new_insert.is_none() {
+                        // Emulate ACK for all pn < first_ack (packets this receiver
+                        // never received because it joined late). This decrements their
+                        // counters in McAck so they are not blocked on this receiver.
+                        debug!("Add receiver {recv_id} in multicast flow {id} with first packet number {pn}");
+                        self.mc_acks[id as usize].new_recv(pn, true);
+                    }
+                }
+                }
+                
+                let msg = MsgFcCtl::RecvReady(leaf.leaf_id,fc_id);
                 leaf.tx_up.send(msg).await?;
             },
 
@@ -850,7 +875,8 @@ impl FcController {
                 {
                     acks_.insert(first_pn..first_pn + 1);
                 }
-                let largest_pn_considered = largest.max(acks_.last().unwrap_or(0));
+                let largest_pn_considered =
+                    largest.max(acks_.last().unwrap_or(0));
                 let mut missing =
                     acks_.get_missing_up_to(largest_pn_considered + 1);
                 info!("Largest={largest_pn:?}. Largest pn considered={largest_pn_considered:?}. ack_to_use={acks_:?}. Missing={missing:?}. Remove_until={pn_drain:?}");
@@ -917,6 +943,7 @@ impl FcController {
     /// provided.
     async fn handle_send_ack(&mut self) -> Result<()> {
         if self.ack_delay.is_none() {
+            error!("No ack delay provided, ignored");
             return Ok(());
         }
         self.possible_send_ack = false;
@@ -978,7 +1005,9 @@ impl FcController {
                             lowest_cwnd,
                         ));
                         match leaf.tx_up.try_send(msg) {
-                            Ok(_) => self.pending_ack[i] = OpenRangeSet::default(),
+                            Ok(_) => {
+                                self.pending_ack[i] = OpenRangeSet::default()
+                            },
                             Err(_e) => info!(
                                 "Leaf {} cannot send ACK to the root.",
                                 leaf.leaf_id
@@ -1002,7 +1031,6 @@ impl FcController {
                         }
                     },
                 }
-
             }
 
             // Stream pieces.
@@ -1076,7 +1104,7 @@ impl FcController {
             let should_check = self.last_bottleneck_check.map_or(true, |t| {
                 now.duration_since(t) >= time::Duration::from_secs(5)
             });
-            if  should_check {
+            if should_check {
                 self.last_bottleneck_check = Some(now);
                 if let Some(ratio) = self.fallback_gain_ratio {
                     if let Some((slowest_id, slowest, Some(new_bottleneck))) =
@@ -1096,13 +1124,12 @@ impl FcController {
             // fallen-back receiver's RTT has improved enough to rejoin the FC
             // flow (RTT <= slowest_active_rtt * gain_ratio).
             if let Some(delay) = self.reintegration_delay {
-                let should_reintegrate_check =
-                    self.last_reintegration_check.map_or(true, |t| {
-                        now.duration_since(t) >= delay
-                    });
-                if should_reintegrate_check &&
-                    self.fallback_gain_ratio.is_some() &&
-                    !self.reintegration_candidates.is_empty()
+                let should_reintegrate_check = self
+                    .last_reintegration_check
+                    .map_or(true, |t| now.duration_since(t) >= delay);
+                if should_reintegrate_check
+                    && self.fallback_gain_ratio.is_some()
+                    && !self.reintegration_candidates.is_empty()
                 {
                     self.last_reintegration_check = Some(now);
 
@@ -1113,8 +1140,8 @@ impl FcController {
                         .recv_rtt_us
                         .iter()
                         .filter(|(id, &(_, n))| {
-                            !self.unicast_recv.contains(id) &&
-                                n >= self.fallback_min_samples
+                            !self.unicast_recv.contains(id)
+                                && n >= self.fallback_min_samples
                         })
                         .map(|(_, &(rtt, _))| rtt)
                         .max();
@@ -1129,9 +1156,9 @@ impl FcController {
                             if let Some(&(rtt, n)) =
                                 self.recv_rtt_us.get(&recv_id)
                             {
-                                if n >= self.fallback_min_samples &&
-                                    (rtt as f64) <=
-                                        slowest_active as f64 * ratio
+                                if n >= self.fallback_min_samples
+                                    && (rtt as f64)
+                                        <= slowest_active as f64 * ratio
                                 {
                                     let fc_id = self
                                         .reintegration_candidates
@@ -1282,7 +1309,7 @@ impl FcController {
     }
 
     /// A receiver joins a flexicast flow.
-    /// This only has an effect on the Leaf controller.
+    /// This only has an effect on the Leaf controller. (NOT WITH LKH)
     async fn on_join(
         &mut self, recv_id: u64, fc_id: u64, aggr_msg: Option<FcAggregatedMsg>,
         first_join: bool, max_pn: Option<u64>,
@@ -1294,13 +1321,9 @@ impl FcController {
         match &mut self.controller_role {
             ControllerRole::Leaf(leaf) => {
                 if first_join {
-                    let pn = self.mc_acks[fc_id as usize]
-                        .get_largest_pn()
-                        .unwrap_or(0);
-                    let msg = MsgRecv::NewHighestPn((fc_id, pn, pn));
-
                     //Send the message to the root controller to update the lkh tree
                     println!("[LKH] propagation join to the root");
+
                     match leaf.tx_up.try_send(MsgFcCtl::Join((
                         recv_id, fc_id, aggr_msg, max_pn, first_join,
                     ))) {
@@ -1310,10 +1333,18 @@ impl FcController {
                         ),
                         Ok(_) => (),
                     };
+
+                    let pn = self.mc_acks[fc_id as usize]
+                        .get_largest_pn()
+                        .unwrap_or(0);
+                    trace!("First pn is {pn} for client {recv_id}");
+                    let msg = MsgRecv::NewHighestPn((fc_id, pn, pn));
+
                     send_uc_path!(self, recv_id, msg);
-                    // Add the receiver in the state if we have to wait for a given number of receiver greater than 1.
+                    /*// Add the receiver in the state if we have to wait for a given number of receiver greater than 1.
                     // This is ugly.
                     if self.wait.is_some_and(|w| w > 1) {
+                        trace!("Should wait so insert");
                         // The first packet number should be 2?
                         let new_insert = self.active_clients[fc_id as usize]
                             .insert(recv_id, pn);
@@ -1326,7 +1357,7 @@ impl FcController {
                             debug!("Add receiver {recv_id} in multicast flow {fc_id} with first packet number {pn}");
                             self.mc_acks[fc_id as usize].new_recv(pn, true);
                         }
-                    }
+                    }*/
                 }
                 return Ok(());
             },
@@ -1335,11 +1366,12 @@ impl FcController {
                     return Ok(());
                 }
                 let tree = root.lkh_tree.get_mut(fc_id as usize).ok_or(
-                    Error::Flexicast(quiche::flexicast::FcError::FcLKHKeyUnknown),
+                    Error::Flexicast(quiche::flexicast::FcError::McPath),
                 )?;
 
                 let captured: Vec<mpsc::Sender<MsgFcCtl>> =
-                    root.tx_down.iter().map(|(k, v)| v.clone()).collect();
+                    root.tx_down.iter().map(|(_k, v)| v.clone()).collect();
+
                 tree.add_user(
                     recv_id.to_be_bytes().to_vec(),
                     Box::new(move |packet| {
@@ -1363,21 +1395,19 @@ impl FcController {
                 );
                 let (key_id, new_key) = tree.get_session_key().unwrap();
 
-                if true {
-                    let packet = KeyUpdatePacket {
-                        delete_new_key: false,
-                        new_key: new_key.to_vec(),
-                        new_key_id: key_id,
-                        is_session_key: true,
-                    };
+                let packet = KeyUpdatePacket {
+                    delete_new_key: false,
+                    new_key: new_key.to_vec(),
+                    new_key_id: key_id,
+                    is_session_key: true,
+                };
 
-                    root.tx_up
-                        .get(fc_id as usize)
-                        .ok_or(Error::Flexicast(
-                            quiche::flexicast::FcError::FcPathId,
-                        ))?
-                        .try_send(MsgFcSource::LKHNotifySessionChange(packet))?;
-                }
+                root.tx_up
+                    .get(fc_id as usize)
+                    .ok_or(Error::Flexicast(
+                        quiche::flexicast::FcError::FcPathId,
+                    ))?
+                    .try_send(MsgFcSource::LKHNotifySessionChange(packet))?;
 
                 println!("[LKH] current tree : {tree}");
                 return Ok(());
@@ -1399,6 +1429,7 @@ impl FcController {
         _ = self.unicast_recv.remove(&recv_id);
         _ = self.delegated_recv[fc_id as usize].remove(&recv_id);
         if new_insert.is_none() {
+            trace!("on first ack of {recv_id} : adding recv");
             // Emulate ACK for all pn < first_ack (packets this receiver
             // never received because it joined late). This decrements their
             // counters in McAck so they are not blocked on this receiver.
@@ -1458,6 +1489,7 @@ impl FcController {
         ack_stream_pieces: Option<Vec<(u64, OpenRangeSet)>>,
         rec_md: Option<OpenRangeSet>, cwnd_opt: Option<(usize, usize, u64)>,
     ) -> Result<()> {
+        debug!("MC_ACK Before : {:?}", self.mc_acks);
         // let name = self.controller_role.name();
         // info!(
         //     "{} receives an ACK: {} acknowledges for flexicast flow
@@ -1539,22 +1571,28 @@ impl FcController {
                 // Update RTT EMA for both active and fallen-back receivers so
                 // the reintegration check has fresh samples.
                 let is_tracked = self.active_clients[fc_id as usize]
-                    .contains_key(&recv_id) ||
-                    self.unicast_recv.contains(&recv_id);
+                    .contains_key(&recv_id)
+                    || self.unicast_recv.contains(&recv_id);
                 if is_tracked {
-                    let (smoothed, n) = self.recv_rtt_us.get(&recv_id)
+                    let (smoothed, n) = self
+                        .recv_rtt_us
+                        .get(&recv_id)
                         .map(|&(old, n)| {
                             let s = ((1.0 - RTT_EMA_ALPHA) * old as f64
-                                + RTT_EMA_ALPHA * rate as f64) as u64;
+                                + RTT_EMA_ALPHA * rate as f64)
+                                as u64;
                             (s, n + 1)
                         })
                         .unwrap_or((rate, 1));
-                    println!("Smoothed RTT for {:?}: {:?}. Sample {}", recv_id, smoothed, n);
+                    println!(
+                        "Smoothed RTT for {:?}: {:?}. Sample {}",
+                        recv_id, smoothed, n
+                    );
                     self.recv_rtt_us.insert(recv_id, (smoothed, n));
                 }
             }
         }
-
+        debug!("MC_ACK After : {:?}", self.mc_acks);
         Ok(())
     }
 
@@ -1575,7 +1613,9 @@ impl FcController {
         let new_worst_rtt = self
             .recv_rtt_us
             .iter()
-            .filter(|(&id, &(_, n))| id != slowest_id && n >= self.fallback_min_samples)
+            .filter(|(&id, &(_, n))| {
+                id != slowest_id && n >= self.fallback_min_samples
+            })
             .map(|(_, &(rtt, _))| rtt)
             .max();
         Some((slowest_id, worst_rtt, new_worst_rtt))
@@ -1602,6 +1642,7 @@ impl FcController {
                 if new_insert.is_none() {
                     // info!("Insert received {recv_id} and indicate that up to
                     // {:?} was ok", pn_drain);
+                    trace!("Adding new receiver as a new leaf controller ?");
                     self.mc_acks[fc_id as usize].new_recv(pn_drain, false);
                 }
             }
@@ -1646,7 +1687,7 @@ pub struct ControllerRoot {
     /// TX towards the flexicast flows.
     tx_up: Vec<mpsc::Sender<MsgFcSource>>,
 
-    lkh_tree: Vec< Box<dyn LogicalTree>>,
+    lkh_tree: Vec<Box<dyn LogicalTree>>,
     /// Should the lkh functionnality be enabled
     pub lkh_enabled: bool,
 }
@@ -1666,8 +1707,8 @@ impl ControllerRoot {
         self.tx_up.push(tx);
         if self.lkh_enabled {
             println!("[LKH] Creating the LKH tree");
-            
-            #[cfg(feature="LKHPlus")]
+
+            #[cfg(feature = "LKHPlus")]
             let lkh = LKHPlus::new(
                 32,
                 Arc::new(Box::new(move |packet| {
@@ -1682,7 +1723,7 @@ impl ControllerRoot {
                 })),
                 2,
             );
-            #[cfg(not(feature= "LKHPlus"))]
+            #[cfg(not(feature = "LKHPlus"))]
             let lkh = Lkh::new(
                 32,
                 Arc::new(Box::new(move |packet| {

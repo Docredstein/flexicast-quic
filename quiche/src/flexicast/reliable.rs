@@ -69,7 +69,7 @@ pub struct RFcUcPath {
 impl Default for RFcUcPath {
     fn default() -> Self {
         let mut mc_ack = McAck::new(true);
-
+        trace!("default RFcUcPath");
         mc_ack.new_recv(0, false);
 
         Self {

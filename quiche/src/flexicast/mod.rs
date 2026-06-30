@@ -1585,6 +1585,7 @@ impl FlexicastConnection for Connection {
             // Notify the flexicast flow that there is a new receiver.
             if let Some(rfc_source) = fc_flow.get_mc_ack_mut() {
                 if !rfc.notified_fc_source {
+                    trace!("New recv from ucfc");
                     rfc_source.new_recv(fc_pn.unwrap_or((0, 0)).0, false);
 
                     rfc.notified_fc_source = true;

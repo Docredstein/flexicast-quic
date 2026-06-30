@@ -152,7 +152,7 @@ struct Args {
     ack_delay_latency: u64,
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 10)]
+#[tokio::main(flavor = "multi_thread", worker_threads = 30)]
 async fn main() {
     env_logger::builder().format_timestamp_nanos().init();
     let args = Args::parse();

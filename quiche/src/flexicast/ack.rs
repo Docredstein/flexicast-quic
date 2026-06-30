@@ -155,6 +155,7 @@ impl McAck {
     /// This will "simulate" the fact that the new receiver ACKed all packets
     /// before `first_pn`.
     pub fn new_recv(&mut self, first_pn: u64, emulate_ack: bool) {
+        trace!("In new_recv with : {first_pn}, {emulate_ack}");
         if emulate_ack {
             // For entries covering [0, first_pn): C is credited as "already
             // ACKed" for those packets.  The count is nb_recv_old - 1 -
@@ -202,7 +203,7 @@ impl McAck {
         // Increment nb_recv BEFORE the dummy ACK so that insert_first_seen
         // uses the correct (post-join) receiver count.
         self.nb_recv += 1;
-
+        println!("New nb_of recv : {}",self.nb_recv);
         // Issue a dummy ACK for any in-flight pns strictly between the last
         // ACKed pn and first_pn.  These packets were already sent before the
         // receiver joined so the receiver will never ACK them; the dummy
@@ -633,7 +634,7 @@ impl McAck {
                 .filter(|&&fp| fp > seg_start)
                 .count() as u64;
             let initial_count = self.nb_recv.saturating_sub(1 + late_count);
-
+            debug!("Adding Packet range : [{start}, {end}[ expected by {initial_count} recver");
             if initial_count == 0 {
                 fully_range.insert(seg_start..seg_end);
             } else {

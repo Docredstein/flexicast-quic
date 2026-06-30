@@ -83,7 +83,7 @@ pub enum MsgFcCtl {
     DelegateStreams((u64, Arc<Vec<FcDelegatedStream>>, bool)),
 
     /// The new receiver is ready to receive content on the flexicast path.
-    RecvReady(u64),
+    RecvReady(u64,Option<u64>),
 
     /// New RTP frame is received and must be sent via the unicast path.
     /// This message MUST only been used for receivers that are not part of a

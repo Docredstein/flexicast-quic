@@ -537,7 +537,7 @@ impl Recovery {
         if in_flight && ack_eliciting {
             self.epochs[epoch].time_of_last_ack_eliciting_packet = Some(now);
         }
-
+        trace!("Packet sent : {} {:?} contain : {:?}", trace_id, self, pkt.frames);
         self.congestion.on_packet_sent(
             self.bytes_in_flight,
             sent_bytes,
@@ -559,7 +559,7 @@ impl Recovery {
 
         self.epochs[epoch].sent_packets.push_back(pkt);
 
-        trace!("{} {:?}", trace_id, self);
+        
     }
 
     pub fn get_packet_send_time(&self) -> Instant {
@@ -690,7 +690,7 @@ impl Recovery {
                 packet::Epoch::Initial
             }
         };
-        println!("PTO AUGMENT !");
+        error!("PTO AUGMENT !");
         self.pto_count += 1;
 
         let rtt = rtt_stats.rtt();
@@ -718,6 +718,8 @@ impl Recovery {
                 network_path_ids.push((unacked_probe.network_path_id, rtt));
             }
         }
+        let to_print:Vec<&SmallVec<[crate::frame::Frame;1]>> = epoch.sent_packets.iter().filter(|p|  p.time_acked.is_none() && p.time_lost.is_none()).map(|a| &a.frames).collect() ;
+        println!("UNACKED FRAMES: {:?}", to_print);
 
         let unacked_iter = epoch.sent_packets
             .iter_mut()

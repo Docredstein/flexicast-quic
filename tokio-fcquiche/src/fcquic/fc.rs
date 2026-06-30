@@ -201,7 +201,7 @@ impl FcChannelAsync {
 
         Ok(())
     }
-
+    /// Notify the root controller of the packet sent on the multicast
     pub async fn sent_pkt_to_controller(&mut self) -> Result<()> {
         
         let mut sent = match self.fc_chan.channel.fc_get_sent_pkt(None) {

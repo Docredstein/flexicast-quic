@@ -348,8 +348,8 @@ impl TokioFcQuicRecv {
 
                 // Join the flexicast socket.
                 if let Some(flexicast) = conn.get_flexicast_attributes() {
-                    if flexicast.get_mc_role()
-                        == McRole::Client(McClientStatus::ListenMcPath(true))
+                    if matches!(flexicast.get_mc_role()
+                        ,McRole::Client(McClientStatus::ListenMcPath(true))|McRole::Client(McClientStatus::JoinedAndKey))
                         && !joined_mc_ip
                         && !self.proxy_uc
                     {

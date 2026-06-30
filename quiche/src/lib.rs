@@ -5618,6 +5618,7 @@ impl Connection {
                                 _ => {
                                     ack_eliciting = true;
                                     in_flight = true;
+                                    
                                 },
                             }
                         }
