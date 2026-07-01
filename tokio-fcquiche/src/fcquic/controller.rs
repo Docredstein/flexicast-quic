@@ -1296,7 +1296,7 @@ impl FcController {
                 if first_join {
                     let pn = self.mc_acks[fc_id as usize]
                         .get_largest_pn()
-                        .unwrap_or(0);
+                        .unwrap_or(0)+10;
                     let msg = MsgRecv::NewHighestPn((fc_id, pn, pn));
 
                     //Send the message to the root controller to update the lkh tree

@@ -23,8 +23,10 @@ pub trait LogicalTree: std::fmt::Debug + std::fmt::Display + Send + Sync {
     fn get_user_count(&self) -> usize;
     /// Return if a user associated to the user_id is stored in the logical tree
     fn contain_user(&self, user_id: &Vec<u8>) -> bool;
-
+    /// Change the current session key
     fn rekey_session(&mut self) -> Result<(), Error>;
+    // Get all user that (should) know this key id
+    //fn get_users_having_key(&self, key_id:u64) -> Vec<Vec<u8>>;
 }
 #[derive(Clone)]
 /// Simple LKH implementation without any particular optimization
@@ -33,6 +35,10 @@ pub struct Lkh {
     //users: HashMap<String, usize>, //Delegated to Tree
     key_size: usize,
     send_group: Arc<Box<dyn Fn(WrappedKeyUpdatePacket) + Send + Sync>>,
+
+    /// Association between key_id -> node_id
+    #[allow(dead_code)]
+    key_map: HashMap<u64, usize>, //TODO
 }
 
 impl std::fmt::Debug for Lkh {
@@ -63,6 +69,7 @@ impl Lkh {
             tree: Tree::new(),
             key_size,
             send_group,
+            key_map: HashMap::new(),
         }
     }
     fn get_user_count(&self) -> usize {
@@ -304,15 +311,12 @@ impl Lkh {
         }
     }
     /// Add a group of users directly
-    pub fn add_user_vec(
-        &mut self, users: HashMap<Vec<u8>, User>,
-        
-    ) {
+    pub fn add_user_vec(&mut self, users: HashMap<Vec<u8>, User>) {
         let _already_updated: HashSet<usize> = HashSet::new();
         //Update in 2 steps, add everyone in the tree then update the keys by starting with the deepest one.
         let user_ids: Vec<Vec<u8>> = users.keys().cloned().collect();
         //users.iter().map(|u| u.user_id.clone()).collect();
-        
+
         for (_user_id, user) in users {
             let user_pointer = Arc::new(user);
 
@@ -338,7 +342,6 @@ impl Lkh {
                     .get_node_by_id_mut(parent_id)
                     .expect("not root but no parent")
                     .key_id = new_key_id;
-
             }
         }
 
@@ -440,8 +443,13 @@ impl LogicalTree for Lkh {
     }
     fn rekey_session(&mut self) -> Result<(), Error> {
         let new_key = self.generate_key();
-        let (old_key_id, old_key) =
-            self.get_session_key().ok_or(Error::CryptoFail).map_err(|e| {println!("Error : unable to get session key");e})?;
+        let (old_key_id, old_key) = self
+            .get_session_key()
+            .ok_or(Error::CryptoFail)
+            .map_err(|e| {
+                println!("Error : unable to get session key");
+                e
+            })?;
         let update = KeyUpdatePacket {
             delete_new_key: false,
             is_session_key: true,
@@ -481,11 +489,7 @@ impl LKHPlus {
         send_group: Arc<Box<dyn Fn(WrappedKeyUpdatePacket) + Send + Sync>>,
         max_unordered_count: usize,
     ) -> Self {
-        let lkh = Lkh {
-            tree: Tree::new(),
-            key_size,
-            send_group,
-        };
+        let lkh = Lkh::new(key_size, send_group);
         LKHPlus {
             lkh,
             unordered_users: HashMap::new(),
@@ -514,10 +518,8 @@ impl LogicalTree for LKHPlus {
         } else {
             let new_key = self.lkh.generate_key();
             if self.unordered_users.len() >= self.max_unordered_count {
-                self.lkh.add_user_vec(
-                    self.unordered_users.drain().collect(),
-                    
-                );
+                self.lkh
+                    .add_user_vec(self.unordered_users.drain().collect());
             }
 
             let root = self.lkh.tree.get_node_by_id_mut(1).expect("Missing root");
@@ -539,7 +541,6 @@ impl LogicalTree for LKHPlus {
                 send,
             };
             self.unordered_users.insert(user_id, new_user);
-            
         }
     }
     fn remove_user(&mut self, user_id: Vec<u8>) {
@@ -578,10 +579,8 @@ impl LogicalTree for LKHPlus {
 
             if self.lkh.get_user_count() == 0 {
                 //We need to change the root
-                self.lkh.add_user_vec(
-                    self.unordered_users.drain().collect(),
-                    
-                );
+                self.lkh
+                    .add_user_vec(self.unordered_users.drain().collect());
             } else {
                 let root = self.lkh.tree.get_root().unwrap();
                 let key = root.key.clone();
@@ -785,27 +784,20 @@ mod tests {
     use super::*;
     #[test]
     fn test_create() {
-        let tree = Tree::new();
-        let lkh = Lkh {
-            tree,
-            key_size: 32,
-            send_group: Arc::new(Box::new(|data| {
-                println!("Sending group data: {:?}", data)
-            })),
-        };
+        let lkh = Lkh::new(
+            32,
+            Arc::new(Box::new(|data| println!("Sending group data: {:?}", data))),
+        );
         println!("{:?}", lkh);
     }
 
     #[test]
     fn test_update_on_already_updated_node() {
-        let tree = Tree::new();
-        let mut lkh = Lkh {
-            tree,
-            key_size: 32,
-            send_group: Arc::new(Box::new(|data| {
-                println!("recieved group data: {:x?}", data)
-            })),
-        };
+        
+        let mut lkh = Lkh::new(
+            32,
+            Arc::new(Box::new(|data| println!("Sending group data: {:?}", data))),
+        );
         println!("{:?}", lkh);
 
         lkh.add_user(
@@ -822,14 +814,10 @@ mod tests {
     }
     #[test]
     fn test_add_one_user() {
-        let tree = Tree::new();
-        let mut lkh = Lkh {
-            tree,
-            key_size: 32,
-            send_group: Arc::new(Box::new(|data| {
-                println!("recieved group data: {:x?}", data)
-            })),
-        };
+        let mut lkh = Lkh::new(
+            32,
+            Arc::new(Box::new(|data| println!("Sending group data: {:?}", data))),
+        );
         println!("{:?}", lkh);
 
         lkh.add_user(
@@ -840,14 +828,10 @@ mod tests {
     }
     #[test]
     fn test_add_three_user() {
-        let tree = Tree::new();
-        let mut lkh = Lkh {
-            tree,
-            key_size: 32,
-            send_group: Arc::new(Box::new(|data| {
-                println!("Sending group data: {:?}", data)
-            })),
-        };
+        let mut lkh = Lkh::new(
+            32,
+            Arc::new(Box::new(|data| println!("Sending group data: {:?}", data))),
+        );
         println!("{:?}", lkh);
 
         lkh.add_user(
@@ -868,16 +852,14 @@ mod tests {
     }
     #[test]
     fn test_adding_one_user_realist() {
-        let tree = Tree::new();
         let users = Arc::new(Mutex::new(TreeTestUser { users: Vec::new() })); //Full gemini
         let users_lkh = users.clone();
-        let mut lkh = Lkh {
-            tree,
-            key_size: 32,
-            send_group: Arc::new(Box::new(move |data| {
+        let mut lkh = Lkh::new(
+            32,
+            Arc::new(Box::new(move |data| {
                 users_lkh.lock().unwrap().receive_group(data)
             })),
-        };
+        );
 
         let user_id = users.lock().unwrap().new_user();
         let unicast_user = users.clone();
@@ -907,16 +889,14 @@ mod tests {
     }
     #[test]
     fn test_adding_three_user_realist() {
-        let tree = Tree::new();
         let users = Arc::new(Mutex::new(TreeTestUser { users: Vec::new() })); //Full gemini
         let users_lkh = users.clone();
-        let mut lkh = Lkh {
-            tree,
-            key_size: 32,
-            send_group: Arc::new(Box::new(move |data| {
+        let mut lkh = Lkh::new(
+            32,
+            Arc::new(Box::new(move |data| {
                 users_lkh.lock().unwrap().receive_group(data)
             })),
-        };
+        );
         for _ in 0..3 {
             let user_id = users.lock().unwrap().new_user();
             let unicast_user = users.clone();
@@ -952,16 +932,15 @@ mod tests {
 
     #[test]
     fn test_adding_32_user_realist() {
-        let tree = Tree::new();
+       
         let users = Arc::new(Mutex::new(TreeTestUser { users: Vec::new() })); //Full gemini
         let users_lkh = users.clone();
-        let mut lkh = Lkh {
-            tree,
-            key_size: 32,
-            send_group: Arc::new(Box::new(move |data| {
+        let mut lkh = Lkh::new(
+            32,
+            Arc::new(Box::new(move |data| {
                 users_lkh.lock().unwrap().receive_group(data)
             })),
-        };
+        );
         for _ in 0..32 {
             let user_id = users.lock().unwrap().new_user();
             let unicast_user = users.clone();
@@ -998,16 +977,15 @@ mod tests {
 
     #[test]
     fn test_remove_user() {
-        let tree = Tree::new();
+        
         let users = Arc::new(Mutex::new(TreeTestUser { users: Vec::new() })); //Full gemini
         let users_lkh = users.clone();
-        let mut lkh = Lkh {
-            tree,
-            key_size: 32,
-            send_group: Arc::new(Box::new(move |data| {
+        let mut lkh = Lkh::new(
+            32,
+            Arc::new(Box::new(move |data| {
                 users_lkh.lock().unwrap().receive_group(data)
             })),
-        };
+        );
         for _ in 0..3 {
             let user_id = users.lock().unwrap().new_user();
             let unicast_user = users.clone();
@@ -1050,16 +1028,15 @@ mod tests {
 
     #[test]
     fn test_remove_all_user() {
-        let tree = Tree::new();
+        
         let users = Arc::new(Mutex::new(TreeTestUser { users: Vec::new() })); //Full gemini
         let users_lkh = users.clone();
-        let mut lkh = Lkh {
-            tree,
-            key_size: 32,
-            send_group: Arc::new(Box::new(move |data| {
+        let mut lkh = Lkh::new(
+            32,
+            Arc::new(Box::new(move |data| {
                 users_lkh.lock().unwrap().receive_group(data)
             })),
-        };
+        );
         for _ in 0..3 {
             let user_id = users.lock().unwrap().new_user();
             let unicast_user = users.clone();
@@ -1257,16 +1234,15 @@ mod tests {
 
     #[test]
     fn add_simple_group() {
-        let tree = Tree::new();
+        
         let users = Arc::new(Mutex::new(TreeTestUser { users: Vec::new() })); //Full gemini
         let users_lkh = users.clone();
-        let mut lkh = Lkh {
-            tree,
-            key_size: 32,
-            send_group: Arc::new(Box::new(move |data| {
+        let mut lkh = Lkh::new(
+            32,
+            Arc::new(Box::new(move |data| {
                 users_lkh.lock().unwrap().receive_group(data)
             })),
-        };
+        );
         let mut users_vec = HashMap::new();
         let mut user_id_vec = Vec::new();
         for _ in 0..4 {
@@ -1307,16 +1283,15 @@ mod tests {
     }
     #[test]
     fn add_successive_group() {
-        let tree = Tree::new();
+        
         let users = Arc::new(Mutex::new(TreeTestUser { users: Vec::new() })); //Full gemini
         let users_lkh = users.clone();
-        let mut lkh = Lkh {
-            tree,
-            key_size: 32,
-            send_group: Arc::new(Box::new(move |data| {
+        let mut lkh = Lkh::new(
+            32,
+            Arc::new(Box::new(move |data| {
                 users_lkh.lock().unwrap().receive_group(data)
             })),
-        };
+        );
         let mut users_vec = HashMap::new();
         let mut user_id_vec = Vec::new();
         for _ in 0..4 {
@@ -1395,16 +1370,14 @@ mod tests {
 
     #[test]
     fn test_adding_one_user_realist_lkhplus() {
-        let tree = Tree::new();
         let users = Arc::new(Mutex::new(TreeTestUser { users: Vec::new() })); //Full gemini
         let users_lkh = users.clone();
-        let lkh = Lkh {
-            tree,
-            key_size: 32,
-            send_group: Arc::new(Box::new(move |data| {
+        let lkh = Lkh::new(
+            32,
+            Arc::new(Box::new(move |data| {
                 users_lkh.lock().unwrap().receive_group(data)
             })),
-        };
+        );
         let mut lkhp = LKHPlus {
             unordered_users: HashMap::new(),
             max_unordered_count: 32,
@@ -1440,17 +1413,15 @@ mod tests {
     }
     #[test]
     fn test_adding_three_user_realist_lkhplus() {
-        let tree = Tree::new();
+        
         let users = Arc::new(Mutex::new(TreeTestUser { users: Vec::new() })); //Full gemini
         let users_lkh = users.clone();
-        let lkh = Lkh {
-            tree,
-            key_size: 32,
-            send_group: Arc::new(Box::new(move |data| {
-                println!("Sent to group : {data:?}\n");
+        let lkh = Lkh::new(
+            32,
+            Arc::new(Box::new(move |data| {
                 users_lkh.lock().unwrap().receive_group(data)
             })),
-        };
+        );
         let mut lkhp = LKHPlus {
             unordered_users: HashMap::new(),
             max_unordered_count: 1,
@@ -1494,16 +1465,15 @@ mod tests {
 
     #[test]
     fn test_adding_32_user_realist_lkhplus() {
-        let tree = Tree::new();
+        
         let users = Arc::new(Mutex::new(TreeTestUser { users: Vec::new() })); //Full gemini
         let users_lkh = users.clone();
-        let lkh = Lkh {
-            tree,
-            key_size: 32,
-            send_group: Arc::new(Box::new(move |data| {
+        let lkh = Lkh::new(
+            32,
+            Arc::new(Box::new(move |data| {
                 users_lkh.lock().unwrap().receive_group(data)
             })),
-        };
+        );
         let mut lkhp = LKHPlus {
             unordered_users: HashMap::new(),
             max_unordered_count: 2,
@@ -1545,16 +1515,15 @@ mod tests {
     }
     #[test]
     fn test_remove_user_lkhplus() {
-        let tree = Tree::new();
+        
         let users = Arc::new(Mutex::new(TreeTestUser { users: Vec::new() })); //Full gemini
         let users_lkh = users.clone();
-        let lkh = Lkh {
-            tree,
-            key_size: 32,
-            send_group: Arc::new(Box::new(move |data| {
+        let lkh = Lkh::new(
+            32,
+            Arc::new(Box::new(move |data| {
                 users_lkh.lock().unwrap().receive_group(data)
             })),
-        };
+        );
         let mut lkhp = LKHPlus {
             unordered_users: HashMap::new(),
             max_unordered_count: 32,
@@ -1603,16 +1572,15 @@ mod tests {
 
     #[test]
     fn test_remove_all_user_lkhplus() {
-        let tree = Tree::new();
+        
         let users = Arc::new(Mutex::new(TreeTestUser { users: Vec::new() })); //Full gemini
         let users_lkh = users.clone();
-        let lkh = Lkh {
-            tree,
-            key_size: 32,
-            send_group: Arc::new(Box::new(move |data| {
+        let lkh = Lkh::new(
+            32,
+            Arc::new(Box::new(move |data| {
                 users_lkh.lock().unwrap().receive_group(data)
             })),
-        };
+        );
         let mut lkhp = LKHPlus {
             unordered_users: HashMap::new(),
             max_unordered_count: 32,

@@ -39,8 +39,11 @@ pub struct Tree {
     //nodes: HashMap<u64, &'a Node>, //Association between nodeID and node
     /// Association between depth (0 being root) and the set of leaves at that depth
     pub depth: HashMap<u64, BTreeSet<usize>>, 
-    users: HashMap<Vec<u8>, usize>, //Association between userID and node, not ideal, should be in LKH
+    /// Association between userID and node, not ideal, should be in LKH
+    users: HashMap<Vec<u8>, usize>, 
+    /// Internal storage for nodes
     array: Vec<Option<Node>>,
+
 }
 //Gemini
 impl fmt::Display for Tree {
